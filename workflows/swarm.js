@@ -18,7 +18,8 @@ export const meta = {
 // Shared inputs may overlap, but must stay stable during concurrent work.
 // Reuse a successful pilotRecord to assemble the full batch without rerunning an edit sample.
 // The returned pilotApproval covers the full contract. After the user reviews that contract and
-// sample, resubmit both records, changing only pilotApproval.approvedByUser to true.
+// sample, resubmit only { pilotRecord, pilotApproval }, changing approvedByUser to true.
+// Continuation restores arguments from pilotApproval.contract (the full batch, not the pilot).
 // Records are caller-supplied workflow state, not authenticated proof of human approval.
 // Resume later execution with Tintin resumeFromRunId only when inputs and the approved contract
 // are still valid. A replay reuses a prefix, not arbitrary completed shards or file snapshots.
@@ -39,7 +40,7 @@ const RESULT_SCHEMA = {
     validation: { type: 'array', items: { type: 'string' } },
     questionsForUser: { type: 'array', items: { type: 'string' } },
     notes: { type: 'array', items: { type: 'string' } },
-    outOfScope: { type: 'array', items: { type: 'string' } },
+    outOfScope: { type: 'array', description: 'Only unauthorized actions actually performed. Return [] when none occurred. Prohibitions, hypothetical risks and actions NOT performed belong in notes.', items: { type: 'string' } },
   },
   required: [
     'shardId', 'status', 'summary', 'filesInspected', 'filesChanged',
@@ -83,18 +84,22 @@ if (!isObject(args)) fail('args must be an object')
 for (const key of ['model', 'effort', 'thinking', 'agentType', 'concurrency', 'maxConcurrent', 'skipPilot', 'pilotApproved', 'startAt']) {
   if (Object.prototype.hasOwnProperty.call(args, key)) fail('args.' + key + ' cannot override the fixed workflow policy')
 }
-const mode = args.mode
+if (args.pilotApproval !== undefined && (!isObject(args.pilotApproval) || !isObject(args.pilotApproval.contract))) {
+  fail('continuation requires the original pilotApproval object with its complete contract')
+}
+const input = args.pilotApproval === undefined ? args : { ...args.pilotApproval.contract, ...args }
+const mode = input.mode
 if (mode !== 'inspect' && mode !== 'edit') fail('mode must be inspect or edit')
-if (!isAbsolutePath(args.cwd)) fail('cwd must be an absolute path without .. segments')
-if (!isText(args.objective)) fail('objective is required')
-if (args.rule !== undefined && typeof args.rule !== 'string') fail('rule must be a string')
-const cwd = cleanPath(args.cwd)
-const rule = args.rule ?? ''
-const sharedReadPaths = pathList(args.sharedReadPaths, 'sharedReadPaths')
-if (!Array.isArray(args.shards) || args.shards.length === 0) fail('at least one pilot shard is required')
+if (!isAbsolutePath(input.cwd)) fail('cwd must be an absolute path without .. segments')
+if (!isText(input.objective)) fail('objective is required')
+if (input.rule !== undefined && typeof input.rule !== 'string') fail('rule must be a string')
+const cwd = cleanPath(input.cwd)
+const rule = input.rule ?? ''
+const sharedReadPaths = pathList(input.sharedReadPaths, 'sharedReadPaths')
+if (!Array.isArray(input.shards) || input.shards.length === 0) fail('args.shards must contain a pilot; continuation may instead supply the complete pilotApproval.contract.shards')
 const ids = new Set()
 const claimedWrites = []
-const shards = args.shards.map((raw, index) => {
+const shards = input.shards.map((raw, index) => {
   if (!isObject(raw)) fail('shards[' + index + '] must be an object')
   if (!isText(raw.id) || !/^[A-Za-z0-9._-]+$/.test(raw.id)) fail('shards[' + index + '].id must use letters, numbers, dot, underscore, or hyphen')
   if (ids.has(raw.id)) fail('duplicate shard id: ' + raw.id)
@@ -122,16 +127,18 @@ const shards = args.shards.map((raw, index) => {
   }
 })
 const readScopes = shard => [...new Set([...sharedReadPaths, ...shard.paths, ...shard.allowedFiles])]
-const contract = { mode, cwd, objective: args.objective, rule, sharedReadPaths, shards }
-const pilotContract = { mode, cwd, objective: args.objective, rule, sharedReadPaths, shard: shards[0] }
-const approval = args.pilotApproval
+const contract = { mode, cwd, objective: input.objective, rule, sharedReadPaths, shards }
+const pilotContract = { mode, cwd, objective: input.objective, rule, sharedReadPaths, shard: shards[0] }
+const approval = input.pilotApproval
 // Approval validates the entire rollout, before any new child can be started.
 if (approval !== undefined) {
   if (!isObject(approval) || approval.approvedByUser !== true) fail('pilotApproval requires explicit user approval')
-  if (!sameValue(approval.contract, contract)) fail('approved execution contract changed; present the current contract for user approval')
+  for (const key of Object.keys(contract)) {
+    if (!sameValue(approval.contract[key], contract[key])) fail('approved execution contract changed at ' + key + '; use the original value or obtain approval for the new contract')
+  }
   if (shards.length < 4) fail('rollout requires the pilot plus at least three qualification shards')
   if (!isText(rule)) fail('confirm a shared rule before rollout')
-  if (args.pilotRecord === undefined) fail('rollout requires the successful pilotRecord')
+  if (input.pilotRecord === undefined) fail('rollout requires the successful pilotRecord')
 }
 
 const promptFor = shard => [
@@ -139,7 +146,7 @@ const promptFor = shard => [
   'Project directory: ' + cwd + ' (the workflow inherits the main Pi working directory).',
   'Shard ID: ' + shard.id,
   'Mode: ' + mode,
-  '', 'Overall objective:', args.objective,
+  '', 'Overall objective:', input.objective,
   '', 'Shared rule (may be a draft during pilot preparation):', rule || '(Not yet specified; identify the criteria needed for a representative sample.)',
   '', 'This shard:', shard.instruction,
   '', 'Allowed read paths, including shared references:', ...readScopes(shard).map(path => '- ' + path),
@@ -156,7 +163,7 @@ const promptFor = shard => [
   '- During preparation, inspect inputs and propose concrete rule clarifications or sample improvements in summary. For a missing standard, threshold, or source-of-truth decision, return status needs_user_input with concise questionsForUser and relevant evidence.',
   '- Ask before changes that depend on an unresolved decision. If a new question appears after valid earlier edits, stop further edits and truthfully report all partial filesChanged; never hide them or automatically roll them back.',
   '- Ordinary missing evidence, negative findings, and cases already covered by the rule belong in notes; they do not block completion.',
-  '- Use blocked for execution failures or unmet prerequisites; report boundary violations in outOfScope. Do not keep exploring indefinitely.',
+  '- Use blocked for execution failures or unmet prerequisites; report only unauthorized actions actually performed in outOfScope (otherwise []). Put prohibitions, unperformed actions and hypothetical risks in notes. Do not keep exploring indefinitely.',
   mode === 'edit'
     ? '- Write only allowedFiles; shared read access grants no additional writes. A verified already-compliant result may have empty filesChanged: explain it with evidence and validation.'
     : '- This is read-only: filesChanged must be empty.',
@@ -209,9 +216,9 @@ const stopResult = (stage, failed) => {
 
 phase('Pilot 1')
 let pilot
-if (args.pilotRecord !== undefined) {
-  if (!isObject(args.pilotRecord) || !sameValue(args.pilotRecord.contract, pilotContract)) fail('pilot inputs or sample contract changed; rerun the affected sample without pilotRecord')
-  pilot = args.pilotRecord.result
+if (input.pilotRecord !== undefined) {
+  if (!isObject(input.pilotRecord) || !sameValue(input.pilotRecord.contract, pilotContract)) fail('pilot inputs or sample contract changed; rerun the affected sample without pilotRecord')
+  pilot = input.pilotRecord.result
   const issue = validateResult(pilot, shards[0], true)
   if (issue) fail('pilotRecord is not a successful sample: ' + issue)
 } else {

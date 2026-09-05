@@ -48,6 +48,7 @@ const resultFor = (request, args) => {
   }
 }
 const execute = async (args, { transform, entries = [] } = {}) => {
+  const fixtureArgs = { ...args.pilotApproval?.contract, ...args }
   const calls = []
   const journal = []
   let active = 0
@@ -62,7 +63,7 @@ const execute = async (args, { transform, entries = [] } = {}) => {
         maxActive = Math.max(maxActive, active)
         try {
           await new Promise(resolve => setTimeout(resolve, 2))
-          const result = transform ? transform(resultFor(request, args), request) : resultFor(request, args)
+          const result = transform ? transform(resultFor(request, fixtureArgs), request) : resultFor(request, fixtureArgs)
           return result === null ? { ok: false, error: 'fixture transport failure' } : { ok: true, text: JSON.stringify(result) }
         } finally { active-- }
       },
@@ -110,6 +111,31 @@ test('single pilot can prepare, then attach a full batch without repeating the s
   assert.equal(successfulValue(execution).completed.length, 10)
   assert.equal(execution.calls.length, 9)
   assert.ok(execution.calls.every(call => call.agentType === 'Operator'))
+})
+
+test('two original records resume the full edit batch without repeating the pilot', async () => {
+  const pilot = successfulValue(await execute(makeArgs(10, 'edit')))
+  const input = {
+    pilotRecord: pilot.pilotRecord,
+    pilotApproval: { ...pilot.pilotApproval, approvedByUser: true },
+  }
+  const run = await execute(input)
+  assert.equal(successfulValue(run).completed.length, 10)
+  assert.equal(run.calls.length, 9)
+  assert.ok(run.calls.every(call => !call.prompt.includes('Shard ID: s0\n')))
+  const changed = await execute({ ...input, rule: 'Changed without approval' })
+  assert.equal(changed.status, 'failed')
+  assert.match(changed.error, /contract changed at rule/)
+  assert.equal(changed.calls.length, 0)
+})
+
+test('prohibitions in notes pass but reported actual out-of-scope activity blocks', async () => {
+  const args = makeArgs()
+  const good = await execute(args, { transform: result => ({ ...result, notes: ['Did not modify shared inputs.'] }) })
+  assert.equal(successfulValue(good).workflowStatus, 'awaiting_pilot_approval')
+  assert.match(good.calls[0].prompt, /unauthorized actions actually performed/)
+  const bad = await execute(args, { transform: result => ({ ...result, outOfScope: ['Modified an unauthorized input.'] }) })
+  assert.equal(successfulValue(bad).workflowStatus, 'blocked')
 })
 
 test('draft criteria permit evidence collection and return concrete questions', async () => {

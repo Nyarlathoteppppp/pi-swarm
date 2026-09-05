@@ -50,12 +50,16 @@ Minimal inspection arguments:
 
 1. Start with one pilot and draft criteria. The main agent relays `questionsForUser`; ordinary observations stay in `notes`.
 2. Once the sample succeeds, retain `pilotRecord`. Add the remaining shards and resubmit it to prepare the full approval contract without repeating the sample.
-3. Show the sample, checks, partial changes, and full batch to the user. Only after approval, resubmit both records with `pilotApproval.approvedByUser: true`.
+3. Show the sample, checks, partial changes, and full batch to the user. Only after approval, pass just `{ pilotRecord, pilotApproval }` with `pilotApproval.approvedByUser: true`. The workflow restores the full arguments from `pilotApproval.contract`; do not reconstruct either record or use the pilot-only contract as the batch.
 4. Three qualification shards run before six-agent waves. A full wave uses four OpenRouter DSF and two official DeepSeek DSF agents. Thirty shards continue as 1 + 3 + 6 + 6 + 6 + 6 + 2.
 
 Rollout needs at least four total shards and a shared rule. Edit shards additionally need exact `allowedFiles`, `preconditions`, and `forbiddenActions`. Pilot edits are real; inspect the diff before approving more. Keep shared inputs stable during concurrent work. Record groups or review concerns belong in shard instructions; no mandatory work-item registry is used.
 
 Approval records are caller-supplied coordination state, not authenticated proof of a human decision. Read/write scope checks inspect reported results; they are not an OS filesystem sandbox. The main Pi must faithfully obtain approval and independently check changes.
+
+## Main-agent communication
+
+If the user only says “use Swarm”, explain: clarify → pilot → user approval → batch execution. Reuse known context and ask only for missing inputs, desired output, acceptance criteria, and edit permission. Propose criteria when needed; never silently decide them. Before an edit pilot, establish exact writable files and prohibitions; otherwise inspect first. Show the sample and full scope for explicit approval. Retrieve original continuation records rather than inventing them. Report submitted, running, and completed only as supported by observed state.
 
 ## Recovery
 
